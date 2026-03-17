@@ -1,0 +1,3 @@
+anthropic
+qwen-tts
+flash-attn --no-build-isolation
