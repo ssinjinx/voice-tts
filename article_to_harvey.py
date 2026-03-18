@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
 article_to_harvey.py
-Ollama + Qwen3-TTS pipeline that reads a news article and outputs
-audio in the style of Paul Harvey.
+Ollama + Qwen3-TTS pipeline — news article → Paul Harvey-style audio.
 
 Usage:
     python article_to_harvey.py article.txt output.wav
-    echo "Article text..." | python article_to_harvey.py - output.wav
-    python article_to_harvey.py article.txt output.wav --clone-audio harvey_sample.wav
+    echo "text..." | python article_to_harvey.py - output.wav
+    python article_to_harvey.py article.txt output.wav --clone-audio harvey.wav
     python article_to_harvey.py article.txt output.wav --model minimax-m2.5:cloud
 """
 
 import argparse
 import re
 import sys
-import urllib.request
-import urllib.error
 import json
+import urllib.request
+import numpy as np
+import soundfile as sf
 from qwen_tts import Qwen3TTSModel
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ FORBIDDEN:
 - Output ONLY the spoken script, no stage directions or labels
 """
 
-VOICE_DESCRIPTION = (
+VOICE_INSTRUCT = (
     "A warm, authoritative American male broadcaster voice. "
     "Deliberate, measured pacing with dramatic pauses between phrases. "
     "Slightly gravelly baritone texture. Mid-century radio announcer cadence. "
@@ -76,16 +76,15 @@ def read_article(path: str) -> str:
         return f.read()
 
 
-def format_as_harvey(article: str, model: str) -> str:
+def format_as_harvey(article: str, ollama_model: str) -> str:
     payload = json.dumps({
-        "model": model,
+        "model": ollama_model,
         "stream": False,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": article},
         ],
     }).encode()
-
     req = urllib.request.Request(
         OLLAMA_URL,
         data=payload,
@@ -97,49 +96,21 @@ def format_as_harvey(article: str, model: str) -> str:
 
 
 def strip_pause_markers(script: str) -> str:
-    """Replace [pause] with a comma so TTS infers a natural pause."""
     return re.sub(r"\[pause\]", ", ", script)
-
-
-def synthesize_voice_design(script: str, tts_model: Qwen3TTSModel, output_path: str):
-    tts_text = strip_pause_markers(script)
-    audio = tts_model.generate_voice_design(
-        text=tts_text,
-        voice_description=VOICE_DESCRIPTION,
-    )
-    tts_model.save_audio(audio, output_path)
-
-
-def synthesize_voice_clone(script: str, tts_model: Qwen3TTSModel, output_path: str, clone_audio: str):
-    tts_text = strip_pause_markers(script)
-    audio = tts_model.generate_voice_clone(
-        text=tts_text,
-        reference_audio=clone_audio,
-    )
-    tts_model.save_audio(audio, output_path)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Paul Harvey TTS pipeline")
     parser.add_argument("article", help="Path to article text file, or - for stdin")
     parser.add_argument("output", help="Output audio file path (.wav)")
-    parser.add_argument(
-        "--clone-audio",
-        metavar="PATH",
-        help="Path to a Paul Harvey audio clip for voice cloning (uses voice design if omitted)",
-    )
-    parser.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"Ollama model to use for text formatting (default: {DEFAULT_MODEL})",
-    )
-    parser.add_argument(
-        "--tts-size",
-        choices=["1.7B", "0.6B"],
-        default="1.7B",
-        help="Qwen3-TTS model size (default: 1.7B)",
-    )
-    parser.add_argument("--print-script", action="store_true", help="Print the formatted script before synthesizing")
+    parser.add_argument("--clone-audio", metavar="PATH",
+                        help="Paul Harvey audio clip for voice cloning (uses voice design if omitted)")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Ollama model for text formatting (default: {DEFAULT_MODEL})")
+    parser.add_argument("--tts-size", choices=["1.7B", "0.6B"], default="1.7B",
+                        help="Qwen3-TTS model size (default: 1.7B)")
+    parser.add_argument("--print-script", action="store_true",
+                        help="Print the formatted script before synthesizing")
     args = parser.parse_args()
 
     # Step 1: read article
@@ -155,20 +126,32 @@ def main():
         print(script)
         print("--------------------------\n")
 
+    tts_text = strip_pause_markers(script)
+
     # Step 3: TTS synthesis
     if args.clone_audio:
-        tts_model_name = f"Qwen3-TTS-12Hz-{args.tts_size}-Base"
-        print(f"Loading {tts_model_name} for voice clone...")
-        tts = Qwen3TTSModel(tts_model_name)
+        model_name = f"Qwen/Qwen3-TTS-12Hz-{args.tts_size}-Base"
+        print(f"Loading {model_name} for voice clone (this will download ~3GB on first run)...")
+        tts = Qwen3TTSModel.from_pretrained(model_name, device_map="cuda:0")
         print("Synthesizing (voice clone)...")
-        synthesize_voice_clone(script, tts, args.output, args.clone_audio)
+        audios, sr = tts.generate_voice_clone(
+            text=tts_text,
+            ref_audio=args.clone_audio,
+            x_vector_only_mode=True,
+            language="english",
+        )
     else:
-        tts_model_name = f"Qwen3-TTS-12Hz-{args.tts_size}-VoiceDesign"
-        print(f"Loading {tts_model_name} for voice design...")
-        tts = Qwen3TTSModel(tts_model_name)
+        model_name = f"Qwen/Qwen3-TTS-12Hz-{args.tts_size}-VoiceDesign"
+        print(f"Loading {model_name} for voice design (this will download ~3GB on first run)...")
+        tts = Qwen3TTSModel.from_pretrained(model_name, device_map="cuda:0")
         print("Synthesizing (voice design)...")
-        synthesize_voice_design(script, tts, args.output)
+        audios, sr = tts.generate_voice_design(
+            text=tts_text,
+            instruct=VOICE_INSTRUCT,
+            language="english",
+        )
 
+    sf.write(args.output, audios[0], sr)
     print(f"Done. Audio saved to: {args.output}")
 
 

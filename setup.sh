@@ -6,7 +6,10 @@ set -e
 conda create -n voice-tts python=3.12 -y
 conda activate voice-tts
 
-pip install -U anthropic qwen-tts
+# ROCm PyTorch — must install before qwen-tts so it uses the GPU build
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.3
+
+pip install -U anthropic qwen-tts soundfile
 
 # Optional but recommended: reduces VRAM usage
 # Requires compatible GPU (CUDA) and torch already installed
