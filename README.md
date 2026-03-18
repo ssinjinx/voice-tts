@@ -1,72 +1,148 @@
-# Voice TTS Module
+# Voice TTS — Paul Harvey News Pipeline
 
-> Paul Harvey-style text-to-speech pipeline for long-form news articles
+Takes a news article, rewrites it in Paul Harvey's storytelling style via a local LLM, then synthesizes the audio using Qwen3-TTS with voice cloning from a real Paul Harvey audio clip.
 
-## Goal
+## How It Works
 
-Take long news articles, process them through an LLM to match Paul Harvey's storytelling style (dramatic pauses, deliberate pacing, narrative structure), then synthesize the audio using Qwen3-TTS to sound like Paul Harvey.
+### Step 1 — LLM Rewrite (Ollama)
 
-## Approach
+The article is sent to a local Ollama model (`minimax-m2.5:cloud` by default) with a system prompt that rewrites it in Paul Harvey's style:
 
-### Step 1 — LLM Text Formatting
-Feed raw article text to an LLM with a system prompt that:
-- Rewrites content using Paul Harvey's structure ("Page 2..." transitions, dramatic reveals)
-- Inserts pause markers `[pause]` at dramatic moments
-- Controls pacing via punctuation and sentence breaks
-- Applies his signature "And now you know... the rest of the story." closing
+- Opens with a dramatic hook
+- Builds suspense, withholds the key reveal
+- Uses "Page 2..." as a mid-story transition
+- Closes with "And now you know... the rest of the story. Good day!"
+- Inserts `[pause]` markers for dramatic beats
+
+The `[pause]` markers are stripped and replaced with commas before TTS synthesis.
 
 ### Step 2 — TTS Synthesis (Qwen3-TTS)
-Two strategies, starting with VoiceDesign:
 
-**Option A — Voice Design (no audio sample needed)**  
-Use `Qwen3-TTS-12Hz-1.7B-VoiceDesign` with a natural language description:
+Two modes are available:
+
+**Voice Clone (default)** — Uses `Qwen3-TTS-12Hz-1.7B-Base` with a reference audio clip (`~/Music/harveyclip.wav`) to clone Paul Harvey's voice. This produces significantly better results than voice design.
+
+**Voice Design** — Uses `Qwen3-TTS-12Hz-1.7B-VoiceDesign` with a text description of the desired voice (warm, gravelly baritone, mid-century radio cadence). No audio sample needed, but output doesn't sound like Harvey. Use `--no-clone` to select this mode.
+
+### Pipeline Diagram
+
 ```
-"A warm, authoritative American male broadcaster voice with deliberate pacing, 
-dramatic pauses between phrases, slightly gravelly texture, mid-century radio 
-announcer cadence, confident and storytelling-focused delivery."
+Article (.txt or stdin)
+    → Ollama LLM (minimax-m2.5:cloud)
+    → Paul Harvey-style script with [pause] markers
+    → Strip [pause] markers → clean text
+    → Qwen3-TTS (voice clone from harveyclip.wav)
+    → Output audio (.wav)
 ```
 
-**Option B — Voice Clone (with Paul Harvey audio sample)**  
-Use `Qwen3-TTS-12Hz-1.7B-Base` with a 3-second audio reference clip.  
-Better fidelity if a clean sample can be sourced.
+## Requirements
 
-### Pipeline Flow
+- **OS:** Linux (tested on Ubuntu with kernel 6.17)
+- **GPU:** AMD Radeon RX 7900 XTX (24GB VRAM) with ROCm
+- **ROCm:** 7.2.0 installed at `/opt/rocm-7.2.0`
+- **Python:** 3.12 via conda (`voice-tts` env)
+- **Ollama:** Running locally on port 11434 with a model pulled (e.g. `minimax-m2.5:cloud`)
+- **Reference audio:** A Paul Harvey `.wav` clip at `~/Music/harveyclip.wav` (13 seconds, used for voice cloning)
+
+## Setup
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/ssinjinx/voice-tts.git
+cd voice-tts
+
+# 2. Run setup (creates conda env, installs ROCm PyTorch + qwen-tts)
+bash setup.sh
+
+# 3. Make sure Ollama is running with a model available
+ollama pull minimax-m2.5:cloud
+ollama serve  # if not already running
+
+# 4. Place a Paul Harvey audio clip for voice cloning
+# Default path: ~/Music/harveyclip.wav
+# Any clean .wav clip of Paul Harvey speaking (10-15 seconds works well)
 ```
-Article text
-    → LLM (Claude/GPT) with Paul Harvey style prompt
-    → Formatted script with pause markers
-    → Qwen3-TTS (VoiceDesign or Clone)
-    → Audio output (.wav / .mp3)
+
+### What setup.sh does
+
+1. Creates a conda env named `voice-tts` with Python 3.12
+2. Installs PyTorch with **ROCm 6.3** wheels (backward-compatible with ROCm 7.2.0) — this must be installed before `qwen-tts` so PyTorch uses the GPU build, not CPU/CUDA
+3. Installs `qwen-tts` and `soundfile`
+
+### Important: ROCm + PyTorch
+
+The AMD 7900 XTX requires ROCm PyTorch wheels. The setup script installs `torch` from `https://download.pytorch.org/whl/rocm6.3`. If you skip this step or install regular PyTorch, the model will fall back to CPU (extremely slow).
+
+Verify GPU is detected:
+```bash
+conda run -n voice-tts python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+# Expected: True AMD Radeon RX 7900 XTX
 ```
+
+## Usage
+
+```bash
+conda activate voice-tts
+
+# Basic usage — reads article, rewrites as Paul Harvey, clones his voice
+python article_to_harvey.py article.txt output.wav
+
+# Read from stdin
+echo "Your article text here..." | python article_to_harvey.py - output.wav
+
+# Print the LLM-generated script before synthesizing
+python article_to_harvey.py article.txt output.wav --print-script
+
+# Use a different Ollama model for the rewrite
+python article_to_harvey.py article.txt output.wav --model qwen3:4b
+
+# Use a different reference audio clip
+python article_to_harvey.py article.txt output.wav --clone-audio /path/to/clip.wav
+
+# Use voice design instead of voice cloning (generic voice, no reference audio)
+python article_to_harvey.py article.txt output.wav --no-clone
+
+# Use the smaller 0.6B TTS model (less VRAM, lower quality)
+python article_to_harvey.py article.txt output.wav --tts-size 0.6B
+```
+
+### CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `article` | *(required)* | Path to article text file, or `-` for stdin |
+| `output` | *(required)* | Output audio file path (.wav) |
+| `--clone-audio PATH` | `~/Music/harveyclip.wav` | Reference audio clip for voice cloning |
+| `--no-clone` | off | Use voice design mode instead of cloning |
+| `--model NAME` | `minimax-m2.5:cloud` | Ollama model for the Paul Harvey rewrite |
+| `--tts-size` | `1.7B` | Qwen3-TTS model size (`1.7B` or `0.6B`) |
+| `--print-script` | off | Print the rewritten script before synthesis |
+
+## Output
+
+- Format: 16-bit PCM WAV, mono, 24kHz sample rate
+- A ~500 word article produces roughly 2 minutes of audio (~6MB)
+- First run downloads the Qwen3-TTS model (~3GB), subsequent runs use the cached model
+
+## Troubleshooting
+
+**MIOpen workspace warnings** — Harmless ROCm noise during inference. Does not affect output quality.
+
+**flash-attn warning** — Flash attention is not available for ROCm. The model falls back to standard PyTorch attention automatically. No action needed.
+
+**Model loading to RAM instead of VRAM** — If `torch.cuda.is_available()` returns `False`, you have the wrong PyTorch build. Reinstall with ROCm wheels:
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.3
+```
+
+**Ollama connection refused** — Make sure Ollama is running: `ollama serve`
 
 ## Tech Stack
 
 | Component | Tool |
 |-----------|------|
-| TTS Model | [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (1.7B VoiceDesign or Base) |
-| LLM | Claude via API |
-| Python Runtime | Python 3.12 + conda env |
-| Package | `qwen-tts` (PyPI) |
-
-## Models
-
-| Model | Size | Use Case |
-|-------|------|----------|
-| `Qwen3-TTS-12Hz-1.7B-VoiceDesign` | 1.7B | Describe Paul Harvey's voice in natural language |
-| `Qwen3-TTS-12Hz-1.7B-Base` | 1.7B | Clone from 3-sec audio reference |
-| `Qwen3-TTS-12Hz-0.6B-Base` | 0.6B | Lighter clone option for less VRAM |
-
-Streaming supported — 97ms first-packet latency for real-time playback.
-
-## Notes on StabilityMatrix
-
-StabilityMatrix is a package manager for image-gen AI (ComfyUI, A1111, etc.). It does **not** natively support Qwen3-TTS. Run the TTS pipeline directly via Python/conda outside of StabilityMatrix.
-
-## Next Steps
-
-- [ ] Set up conda env with `qwen-tts`
-- [ ] Write Paul Harvey LLM prompt template
-- [ ] Test VoiceDesign with voice description
-- [ ] Source a clean Paul Harvey audio clip for voice clone comparison
-- [ ] Build pipeline script: `article_to_harvey.py`
-- [ ] Evaluate output quality and iterate on voice description/prompt
+| TTS Model | [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) 1.7B (Base for clone, VoiceDesign for text-described voice) |
+| LLM | [Ollama](https://ollama.com) running locally (default: minimax-m2.5:cloud) |
+| GPU | AMD Radeon RX 7900 XTX via ROCm 7.2.0 |
+| Python | 3.12 in conda `voice-tts` env |
+| Audio | `soundfile` for WAV output |

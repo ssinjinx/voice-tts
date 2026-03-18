@@ -66,6 +66,7 @@ VOICE_INSTRUCT = (
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 DEFAULT_MODEL = "minimax-m2.5:cloud"
+DEFAULT_CLONE_AUDIO = "/home/ssinjin/Music/harveyclip.wav"
 
 # ---------------------------------------------------------------------------
 
@@ -103,8 +104,10 @@ def main():
     parser = argparse.ArgumentParser(description="Paul Harvey TTS pipeline")
     parser.add_argument("article", help="Path to article text file, or - for stdin")
     parser.add_argument("output", help="Output audio file path (.wav)")
-    parser.add_argument("--clone-audio", metavar="PATH",
-                        help="Paul Harvey audio clip for voice cloning (uses voice design if omitted)")
+    parser.add_argument("--clone-audio", metavar="PATH", default=DEFAULT_CLONE_AUDIO,
+                        help=f"Paul Harvey audio clip for voice cloning (default: {DEFAULT_CLONE_AUDIO})")
+    parser.add_argument("--no-clone", action="store_true",
+                        help="Use voice design instead of voice cloning")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help=f"Ollama model for text formatting (default: {DEFAULT_MODEL})")
     parser.add_argument("--tts-size", choices=["1.7B", "0.6B"], default="1.7B",
@@ -129,7 +132,7 @@ def main():
     tts_text = strip_pause_markers(script)
 
     # Step 3: TTS synthesis
-    if args.clone_audio:
+    if args.clone_audio and not args.no_clone:
         model_name = f"Qwen/Qwen3-TTS-12Hz-{args.tts_size}-Base"
         print(f"Loading {model_name} for voice clone (this will download ~3GB on first run)...")
         tts = Qwen3TTSModel.from_pretrained(model_name, device_map="cuda:0")
